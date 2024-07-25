@@ -74,6 +74,8 @@ map<string, bool> terminal_symbols = {
 map<string, int> proc_arg_num;
 map<string, int> proc_var_num;
 
+int special_label_id = 0;
+
 Node* build_tree() {
     string s = "";
 
@@ -195,6 +197,15 @@ void generate_code(string inst, int param1 = 0, int param2 = 0, int param3 = 0, 
 
 }
 
+
+int get_correct_offset(string proc, string id) {
+    if (var_offset[proc][id] <= 0) {
+        return var_offset[proc][id];
+    } else {
+        return 4 * (proc_arg_num[proc] - (var_offset[proc][id] / 4) + 1);
+    }
+}
+
 void store_const(int reg, int val) {
     generate_code("lis", reg);
     generate_code(".word", val);
@@ -211,14 +222,28 @@ void pop_from_stk(int reg) {
 }
 
 
-void init_dcl(Node* node) {
+
+void init_params(Node* node, string curr_proc, int num_params) {
+
+    if (node->symbol == "params") {
+        if (node->children.size() == 0) {
+            proc_arg_num[curr_proc] = 0;
+        } else {
+            init_params(node->children[0], curr_proc, num_params);
+        }
+    } else if (node->symbol == "paramlist") {
+        if (node->children.size() == 1) {
+            proc_arg_num[curr_proc] = num_params + 1;
+            var_offset[curr_proc][node->children[0]->children[1]->lexeme] = 4 * num_params + 4;
+        } else if (node->children.size() == 3) {
+            var_offset[curr_proc][node->children[0]->children[1]->lexeme] = 4 * num_params + 4;
+            init_params(node->children[2], curr_proc, num_params + 1);
+        }
+    }
+
 
 }
-
 void init_main_var(Node* node) {
-
-    store_const(4, 4);
-    store_const(11, 1);
 
     generate_code("sw", 1, -4, 30);
     generate_code("sub", 30, 30, 4);
@@ -227,8 +252,8 @@ void init_main_var(Node* node) {
 
     generate_code("sub", 29, 30, 4);
 
-    var_offset["wain"][node->children[3]->children[1]->lexeme] = 8;
-    var_offset["wain"][node->children[5]->children[1]->lexeme] = 4;
+    var_offset["wain"][node->children[3]->children[1]->lexeme] = 4;
+    var_offset["wain"][node->children[5]->children[1]->lexeme] = 8;
 
     proc_arg_num["wain"] = 2;
 }
@@ -240,13 +265,21 @@ void init_dcls(Node* node, string curr_proc, int num_dcl) {
         proc_var_num[curr_proc] = num_dcl;
     } else {
         // var declaration
-        if (std::stoi(node->children[3]->lexeme) == 0) {
-            generate_code("sw", 0, -4, 30);
-            generate_code("sub", 30, 30, 4);
-        } else {
-            store_const(3, std::stoi(node->children[3]->lexeme));
-            generate_code("sw", 3, -4, 30);
-            generate_code("sub", 30, 30, 4);
+        if (node->children[1]->children[0]->children.size() == 1) {
+            if (std::stoi(node->children[3]->lexeme) == 0) {
+                generate_code("sw", 0, -4, 30);
+                generate_code("sub", 30, 30, 4);
+            } else {
+                store_const(3, std::stoi(node->children[3]->lexeme));
+                generate_code("sw", 3, -4, 30);
+                generate_code("sub", 30, 30, 4);
+            }
+        } else if (node->children[1]->children[0]->children.size() == 2) {
+            if (node->children[3]->symbol == "NULL") {
+                store_const(3, 1);
+                generate_code("sw", 3, -4, 30);
+                generate_code("sub", 30, 30, 4);
+            }
         }
 
         var_offset[curr_proc][node->children[1]->children[1]->lexeme] = num_dcl * -4;
@@ -254,14 +287,15 @@ void init_dcls(Node* node, string curr_proc, int num_dcl) {
     }
 }
 
-void generate_expr(Node* node, string curr_proc) {
+
+void generate_expr_for_arg(Node* node, string curr_proc) {
     if (node->symbol == "expr") {
         if (node->children.size() == 1) {
-            generate_expr(node->children[0], curr_proc);
+            generate_expr_for_arg(node->children[0], curr_proc);
         } else {
-            generate_expr(node->children[0], curr_proc);
+            generate_expr_for_arg(node->children[0], curr_proc);
             push_to_stk(3);
-            generate_expr(node->children[2], curr_proc);
+            generate_expr_for_arg(node->children[2], curr_proc);
             pop_from_stk(5);
             if (node->children[1]->symbol == "PLUS") {
                 generate_code("add", 3, 5, 3);
@@ -274,7 +308,8 @@ void generate_expr(Node* node, string curr_proc) {
             if (node->children[0]->symbol == "NUM") {
                 store_const(3, std::stoi(node->children[0]->lexeme));
             } else if (node->children[0]->symbol == "ID") {
-                generate_code("lw", 3, var_offset[curr_proc][node->children[0]->lexeme], 29);
+                int offset = get_correct_offset(curr_proc, node->children[0]->lexeme);
+                generate_code("lw", 3, offset, 29);
             }
         } else if (node->children.size() == 3) {
             if (node->children[0]->symbol == "GETCHAR") {
@@ -282,8 +317,177 @@ void generate_expr(Node* node, string curr_proc) {
                 generate_code(".word", -1, -1, -1, "0xffff0004");
                 generate_code("lw", 3, 0, 5);
             } else {
+                generate_expr_for_arg(node->children[1], curr_proc);
+            }
+        } 
+    } else if (node->symbol == "term") {
+        if (node->children.size() == 1) {
+            generate_expr_for_arg(node->children[0], curr_proc);
+        } else {
+            generate_expr_for_arg(node->children[0], curr_proc);
+            push_to_stk(3);
+            generate_expr_for_arg(node->children[2], curr_proc);
+            pop_from_stk(5);
+            if (node->children[1]->symbol == "STAR") {
+                generate_code("multu", 5, 3);
+                generate_code("mflo", 3);
+            } else if (node->children[1]->symbol == "SLASH") {
+                generate_code("divu", 5, 3);
+                generate_code("mflo", 3);
+            } else if (node->children[1]->symbol == "PCT") {
+                generate_code("divu", 5, 3);
+                generate_code("mfhi", 3);
+            }
+        }
+    }
+}
+
+
+Node* remove_bracket(Node* node) {
+    if (node->children[0]->symbol == "LPAREN") {
+        return remove_bracket(node->children[1]);
+    } else {
+        return node;
+    }
+}
+
+
+void generate_expr(Node* node, string curr_proc) {
+    if (node->symbol == "expr") {
+        if (node->children.size() == 1) {
+            generate_expr(node->children[0], curr_proc);
+        } else {
+            if (node->children[0]->type == 2 && node->children[2]->type == 2) {
+                generate_expr(node->children[0], curr_proc);
+                push_to_stk(3);
+                generate_expr(node->children[2], curr_proc);
+                pop_from_stk(5);
+                generate_code("sub", 3, 5, 3);
+                generate_code("div", 3, 4);
+                generate_code("mflo", 3);
+            } else {
+                generate_expr(node->children[0], curr_proc);
+
+                if (node->children[2]->type == 2) {
+                    generate_code("mult", 3, 4);
+                    generate_code("mflo", 3);
+                }
+                
+                push_to_stk(3);
+                generate_expr(node->children[2], curr_proc);
+
+                if (node->children[0]->type == 2) {
+                    generate_code("mult", 3, 4);
+                    generate_code("mflo", 3);
+                }
+
+                pop_from_stk(5);
+                if (node->children[1]->symbol == "PLUS") {
+                    generate_code("add", 3, 5, 3);
+                } else if (node->children[1]->symbol == "MINUS") {
+                    generate_code("sub", 3, 5, 3);
+                }
+            }
+        }
+    } else if (node->symbol == "factor") {
+        if (node->children.size() == 1) {
+            if (node->children[0]->symbol == "NUM") {
+                store_const(3, std::stoi(node->children[0]->lexeme));
+            } else if (node->children[0]->symbol == "ID") {
+                int offset = get_correct_offset(curr_proc, node->children[0]->lexeme);
+                generate_code("lw", 3, offset, 29);
+            } else if (node->children[0]->symbol == "NULL") {
+                store_const(3, 1);
+            }
+        } else if (node->children.size() == 2) {
+            
+            if (node->children[0]->symbol == "STAR") {
+                generate_expr(node->children[1], curr_proc);
+                generate_code("lw", 3, 0, 3);
+            } else if (node->children[0]->symbol == "AMP") {
+                // node->children[1]->symbol should be "lvalue"
+                if (node->children[1]->children[0]->symbol == "STAR") {
+                    generate_expr(node->children[1]->children[1], curr_proc);
+                } else if (node->children[1]->children[0]->symbol == "ID") {
+                    int offset = get_correct_offset(curr_proc, node->children[1]->children[0]->lexeme);
+                    generate_code("lis", 3);
+                    generate_code(".word", offset);
+                    generate_code("add", 3, 29, 3);
+                } else if (node->children[1]->children[0]->symbol == "LPAREN") {
+                    Node* inside_node = remove_bracket(node->children[1]);
+                    if (inside_node->children[0]->symbol == "STAR") {
+                        generate_expr(inside_node->children[1], curr_proc);
+                    } else if (inside_node->children[0]->symbol == "ID") {
+                        int offset = get_correct_offset(curr_proc, inside_node->children[0]->lexeme);
+                        generate_code("lis", 3);
+                        generate_code(".word", offset);
+                        generate_code("add", 3, 29, 3);
+                    }
+                }
+            }
+        } else if (node->children.size() == 3) {
+            if (node->children[0]->symbol == "GETCHAR") {
+                generate_code("lis", 5, 0, 0);
+                generate_code(".word", -1, -1, -1, "0xffff0004");
+                generate_code("lw", 3, 0, 5);
+
+
+            } else if (node->children[0]->symbol == "ID") { // proc call without args
+                
+                string called_proc = node->children[0]->lexeme;
+
+                push_to_stk(29);
+                push_to_stk(31);
+                
+                generate_code("lis", 25);
+                generate_code(".word", -1, -1, -1, "USER" + called_proc);
+                generate_code("jalr", 25);
+
+                pop_from_stk(31);
+                pop_from_stk(29);
+
+            } else {
                 generate_expr(node->children[1], curr_proc);
             }
+        } else if (node->children.size() == 4) { // proc call without argument
+            
+            string called_proc = node->children[0]->lexeme;
+
+            push_to_stk(29);
+            push_to_stk(31);
+
+            // handle_proc_call_args
+            generate_expr(node->children[2], curr_proc);
+  
+            generate_code("lis", 25);
+            generate_code(".word", -1, -1, -1, "USER" + called_proc);
+            generate_code("jalr", 25);
+
+            for (int i = 0; i < proc_arg_num[called_proc]; i++) {
+                generate_code("add", 30, 30, 4);
+            }
+
+            pop_from_stk(31);
+            pop_from_stk(29);
+        } else if (node->children.size() == 5) { // new
+            generate_expr(node->children[3], curr_proc);
+            push_to_stk(1);
+            generate_code("add", 1, 3, 0);
+            push_to_stk(31);
+
+            generate_code("lis", 5);
+            generate_code(".word", -1, -1, -1, "new");
+            generate_code("jalr", 5);
+
+            pop_from_stk(31);
+            pop_from_stk(1);
+
+            // change $3 to 1 if it is originally 0
+            string special_label = "skip" + std::to_string(special_label_id);
+            special_label_id += 1;
+            generate_code("bne", 3, 0, 0, special_label);
+            generate_code("add", 3, 0, 11);
+            special_code(special_label + ":");
         }
     } else if (node->symbol == "term") {
         if (node->children.size() == 1) {
@@ -304,6 +508,16 @@ void generate_expr(Node* node, string curr_proc) {
                 generate_code("mfhi", 3);
             }
         }
+    } else if (node->symbol == "arglist") {
+        if (node->children.size() == 1) {
+            generate_expr(node->children[0], curr_proc);
+            push_to_stk(3);
+        } else if (node->children.size() == 3) {
+            generate_expr(node->children[0], curr_proc);
+            push_to_stk(3);
+            generate_expr(node->children[2], curr_proc);
+        }
+            
     }
 }
 
@@ -329,21 +543,37 @@ void generate_test(Node* node, string curr_proc, string true_label, string false
         generate_code("bne", 5, 3, 0, true_label);
         generate_code("beq", 0, 0, 0, false_label);
     } else if (node->children[1]->symbol == "LT") {
-        generate_code("slt", 3, 5, 3);
+        if (node->children[0]->type == 2 && node->children[2]->type == 2) {
+            generate_code("sltu", 3, 5, 3);
+        } else {
+            generate_code("slt", 3, 5, 3);
+        }
         generate_code("beq", 3, 11, 0, true_label);
         generate_code("beq", 0, 0, 0, false_label);
     } else if (node->children[1]->symbol == "GT") {
         generate_code("beq", 5, 3, 0, false_label);
-        generate_code("slt", 3, 5, 3);
+        if (node->children[0]->type == 2 && node->children[2]->type == 2) {
+            generate_code("sltu", 3, 5, 3);
+        } else {
+            generate_code("slt", 3, 5, 3);
+        }
         generate_code("beq", 3, 11, 0, false_label);
         generate_code("beq", 0, 0, 0, true_label);
     } else if (node->children[1]->symbol == "LE") {
         generate_code("beq", 5, 3, 0, true_label);
-        generate_code("slt", 3, 5, 3);
+        if (node->children[0]->type == 2 && node->children[2]->type == 2) {
+            generate_code("sltu", 3, 5, 3);
+        } else {
+            generate_code("slt", 3, 5, 3);
+        }
         generate_code("beq", 3, 11, 0, true_label);
         generate_code("beq", 0, 0, 0, false_label);
     } else if (node->children[1]->symbol == "GE") {
-        generate_code("slt", 3, 5, 3);
+        if (node->children[0]->type == 2 && node->children[2]->type == 2) {
+            generate_code("sltu", 3, 5, 3);
+        } else {
+            generate_code("slt", 3, 5, 3);
+        }
         generate_code("beq", 3, 0, 0, true_label);
         generate_code("beq", 0, 0, 0, false_label);
     }
@@ -363,9 +593,39 @@ void generate_stmt(Node* node, string curr_proc) {
         if (node->children[1]->symbol == "BECOMES") { // assignment
             generate_expr(node->children[2], curr_proc);
 
-            string var_id = node->children[0]->children[0]->lexeme;
-    
-            generate_code("sw", 3, var_offset[curr_proc][var_id], 29);
+            if (node->children[0]->children[0]->symbol == "ID") {
+                string var_id = node->children[0]->children[0]->lexeme;
+                int offset = get_correct_offset(curr_proc, var_id);
+                generate_code("sw", 3, offset, 29);
+            } else if (node->children[0]->children[0]->symbol == "STAR") {
+                push_to_stk(3);
+                generate_expr(node->children[0]->children[1], curr_proc);
+                pop_from_stk(5);
+                generate_code("sw", 5, 0, 3);
+            }
+        } else if (node->children[0]->symbol == "DELETE") {
+
+            string special_label = "skip" + std::to_string(special_label_id);
+            special_label_id += 1;
+
+            generate_expr(node->children[3], curr_proc);
+            generate_code("beq", 3, 11, -1, special_label);
+
+            push_to_stk(1);
+            push_to_stk(31);
+
+            generate_code("add", 1, 3, 0);
+
+            generate_code("lis", 5);
+            generate_code(".word", -1, -1, -1, "delete");
+            generate_code("jalr", 5);
+
+            pop_from_stk(31);
+            pop_from_stk(1);
+
+            special_code(special_label + ":");
+            
+
         } else if (node->children[0]->symbol == "PUTCHAR") {
             generate_expr(node->children[2], curr_proc);
             generate_code("lis", 5, 0, 0);
@@ -414,11 +674,25 @@ void generate_stmt(Node* node, string curr_proc) {
 
 
 
-void epilogue(Node* node, string curr_proc) {
-    
-    for (int i = 0; i < proc_arg_num[curr_proc]; i++) {
-        generate_code("add", 30, 30, 4);
+int saved_reg_offset = 4;
+
+void save_registers() {
+    push_to_stk(5);
+}
+
+void restore_registers() {
+    pop_from_stk(5);
+}
+
+
+void epilogue(string curr_proc) {
+
+    if (curr_proc == "wain") {
+        for (int i = 0; i < proc_arg_num[curr_proc]; i++) {
+            generate_code("add", 30, 30, 4);
+        }
     }
+
     for (int i = 0; i < proc_var_num[curr_proc]; i++) {
         generate_code("add", 30, 30, 4);
     }
@@ -426,28 +700,100 @@ void epilogue(Node* node, string curr_proc) {
     generate_code("jr", 31);
 }
 
+void alloc_init(Node* node) {
+    if (node->children[3]->children[0]->children.size() == 2) { // wain arg 1 is pointer
+        push_to_stk(2);
+        generate_code("lw", 2, 4, 29);
+        push_to_stk(31);
 
-void generate(Node* root_node) {
+        generate_code("lis", 5);
+        generate_code(".word", -1, -1, -1, "init");
+        generate_code("jalr", 5);
+        
+        pop_from_stk(31);
+        pop_from_stk(2);
+    } else if (node->children[3]->children[0]->children.size() == 1) {
+        push_to_stk(2);
+        generate_code("add", 2, 0, 0);
+        push_to_stk(31);
 
-    
-    root_node = root_node->children[1]->children[0];
-    /*
-    for (auto child: root_node->children) {
-        traverse_tree(child);
+        generate_code("lis", 5);
+        generate_code(".word", -1, -1, -1, "init");
+        generate_code("jalr", 5);
+
+        pop_from_stk(31);
+        pop_from_stk(2);
     }
-    */
+}
+
+// generate procedure by procedure
+void helper_generator(Node* root_node) {
+
+    // root_node->symbol should be procedures
+    if (root_node->children[0]->symbol == "procedure") {
+        Node* next_proc_node = root_node->children[1];
+        root_node = root_node->children[0];
+        
+        special_code("USER" + root_node->children[1]->lexeme + ":"); // procedure name
+
+        init_params(root_node->children[3], root_node->children[1]->lexeme, 0);
+
+        generate_code("sub", 29, 30, 4);
+
+        init_dcls(root_node->children[6], root_node->children[1]->lexeme, 0);
+
+        save_registers();
+
+        generate_stmt(root_node->children[7], root_node->children[1]->lexeme);
+
+        generate_expr(root_node->children[9], root_node->children[1]->lexeme); // return statement
+
+        restore_registers();
+
+        epilogue(root_node->children[1]->lexeme);
+
+
+        //cout << root_node->children[1]->lexeme << proc_arg_num[root_node->children[1]->lexeme] << endl;
+        special_code("; ___________________________________________________________________________________________________________");
+        helper_generator(next_proc_node);
+
+
+    } else if (root_node->children[0]->symbol == "main") {
+        root_node = root_node->children[0];
+
+        special_code("wain:");
+
+        init_main_var(root_node);
+
+        init_dcls(root_node->children[8], "wain", 0);
+
+        alloc_init(root_node);
+
+        generate_stmt(root_node->children[9], "wain");
+
+        generate_expr(root_node->children[11], "wain"); // return statement
+
+
+        epilogue("wain");
+    }
+}
+
+
+void main_generator(Node* root_node) {
 
     special_code(".import print");
+    special_code(".import init");
+    special_code(".import new");
+    special_code(".import delete");
 
-    init_main_var(root_node);
+    store_const(4, 4);
+    store_const(11, 1);
 
-    init_dcls(root_node->children[8], "wain", 0);
+    generate_code("beq", 0, 0, 0, "wain");
 
-    generate_stmt(root_node->children[9], "wain");
+    special_code("; ________________________________________________________________________________");
 
-    generate_expr(root_node->children[11], "wain"); // return statement
-
-    epilogue(root_node, "wain");
+    helper_generator(root_node->children[1]);
 
 }
 
@@ -455,7 +801,7 @@ int main(int argc, char *argv[]) {
 
     Node* tree = build_tree();
 
-    generate(tree);
+    main_generator(tree);
 
     clear_memory(tree);
     delete tree;
